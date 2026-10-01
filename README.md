@@ -1,4 +1,4 @@
-<pre><code># FirmXplore
+# FirmXplore
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-runtime-blue)](https://www.docker.com/)
@@ -16,13 +16,13 @@ FirmXplore does not generate exploits, does not probe public targets, and does n
 
 FirmXplore turns a firmware image into a reproducible analysis workspace while keeping static reasoning, runtime observations, and final claims explicitly separated.
 
-&lt;p align="center"&gt;
-  &lt;img src="assets/architecture.png" alt="FirmXplore Evidence-Driven Firmware Analysis Architecture" width="100%"&gt;
-&lt;/p&gt;
+<p align="center">
+  <img src="assets/architecture.png" alt="FirmXplore Evidence-Driven Firmware Analysis Architecture" width="100%">
+</p>
 
-&lt;p align="center"&gt;
-  &lt;sub&gt;&lt;b&gt;Figure 1.&lt;/b&gt; FirmXplore evidence-driven firmware analysis architecture.&lt;/sub&gt;
-&lt;/p&gt;
+<p align="center">
+  <sub><b>Figure 1.</b> FirmXplore evidence-driven firmware analysis architecture.</sub>
+</p>
 
 Provider-backed investigation is a planning and decision layer. The provider sees registered structured tools through FirmXplore's controller; it does not receive arbitrary shell, Docker, QEMU, or process-execution tools.
 
@@ -48,13 +48,13 @@ Provider-backed investigation is a planning and decision layer. The provider see
 
 FirmXplore follows an evidence-centered investigation workflow. Firmware preparation narrows the search space, static analysis produces explicit evidence-backed hypotheses, and bounded dynamic validation collects real observations before a hypothesis can influence a final finding.
 
-&lt;p align="center"&gt;
-  &lt;img src="assets/workflow.png" alt="FirmXplore End-to-End Investigation Workflow" width="100%"&gt;
-&lt;/p&gt;
+<p align="center">
+  <img src="assets/workflow.png" alt="FirmXplore End-to-End Investigation Workflow" width="100%">
+</p>
 
-&lt;p align="center"&gt;
-  &lt;sub&gt;&lt;b&gt;Figure 2.&lt;/b&gt; FirmXplore end-to-end investigation workflow.&lt;/sub&gt;
-&lt;/p&gt;
+<p align="center">
+  <sub><b>Figure 2.</b> FirmXplore end-to-end investigation workflow.</sub>
+</p>
 
 The workflow is intentionally conservative: reachability is not treated as exploitability, a source and sink do not automatically establish data flow, and runtime reconstruction is not presented as proof of stock vendor boot parity.
 
@@ -86,7 +86,7 @@ The user-facing console command is `firmxplore`. The Python package name remains
 firmxplore analyze firmware.bin
 ```
 
-By default, FirmXplore creates a task under `workspace/` and generates reports under `workspace/&lt;task-id&gt;/reports/`.
+By default, FirmXplore creates a task under `workspace/` and generates reports under `workspace/<task-id>/reports/`.
 
 Advanced example:
 
@@ -204,7 +204,7 @@ Degraded and interrupted investigations are **non-canonical** in Round-5 finaliz
 Every provider HTTP call is logged to:
 
 ```text
-workspace/&lt;task-id&gt;/web_model_usage.jsonl
+workspace/<task-id>/web_model_usage.jsonl
 ```
 
 Each record contains `ts`, `model`, `endpoint`, `prompt_tokens`, `completion_tokens`, `total_tokens`, and `status`. This file is the authoritative source for token accounting and cost auditing. The Web console surfaces the same data in the task detail view.
@@ -235,22 +235,22 @@ Each analysis task can generate:
 
 | **Artifact**                 | **Path**                                                  |
 | :--------------------------- | :-------------------------------------------------------- |
-| JSON report                  | `workspace/&lt;task-id&gt;/reports/report.json`                 |
-| Markdown report              | `workspace/&lt;task-id&gt;/reports/report.md`                   |
-| HTML report                  | `workspace/&lt;task-id&gt;/reports/report.html`                 |
-| Report manifest              | `workspace/&lt;task-id&gt;/reports/report_manifest.json`        |
-| Pipeline summary             | `workspace/&lt;task-id&gt;/pipeline_summary.json`               |
-| Pipeline stages              | `workspace/&lt;task-id&gt;/pipeline_stages.json`                |
-| Extraction record            | `workspace/&lt;task-id&gt;/artifacts/extraction.json`           |
-| Canonical rootfs record      | `workspace/&lt;task-id&gt;/artifacts/rootfs.json`               |
-| Ghidra summary               | `workspace/&lt;task-id&gt;/ghidra/analysis_summary.json`        |
-| Attack surface               | `workspace/&lt;task-id&gt;/surface/attack_surface_summary.json` |
-| Taint summary                | `workspace/&lt;task-id&gt;/taint/summary.json`                  |
-| Hypotheses                   | `workspace/&lt;task-id&gt;/hypotheses/synthesis_analysis.json`  |
-| Provider investigation trace | `workspace/&lt;task-id&gt;/reports/investigation.json`          |
-| Provider token usage         | `workspace/&lt;task-id&gt;/web_model_usage.jsonl`               |
-| Dynamic evidence             | `workspace/&lt;task-id&gt;/dynamic/evidence/evidence.json`      |
-| Findings                     | `workspace/&lt;task-id&gt;/findings/findings.json`              |
+| JSON report                  | `workspace/<task-id>/reports/report.json`                 |
+| Markdown report              | `workspace/<task-id>/reports/report.md`                   |
+| HTML report                  | `workspace/<task-id>/reports/report.html`                 |
+| Report manifest              | `workspace/<task-id>/reports/report_manifest.json`        |
+| Pipeline summary             | `workspace/<task-id>/pipeline_summary.json`               |
+| Pipeline stages              | `workspace/<task-id>/pipeline_stages.json`                |
+| Extraction record            | `workspace/<task-id>/artifacts/extraction.json`           |
+| Canonical rootfs record      | `workspace/<task-id>/artifacts/rootfs.json`               |
+| Ghidra summary               | `workspace/<task-id>/ghidra/analysis_summary.json`        |
+| Attack surface               | `workspace/<task-id>/surface/attack_surface_summary.json` |
+| Taint summary                | `workspace/<task-id>/taint/summary.json`                  |
+| Hypotheses                   | `workspace/<task-id>/hypotheses/synthesis_analysis.json`  |
+| Provider investigation trace | `workspace/<task-id>/reports/investigation.json`          |
+| Provider token usage         | `workspace/<task-id>/web_model_usage.jsonl`               |
+| Dynamic evidence             | `workspace/<task-id>/dynamic/evidence/evidence.json`      |
+| Findings                     | `workspace/<task-id>/findings/findings.json`              |
 
 The HTML report is a local/offline artifact, not a Web UI.
 
@@ -391,39 +391,38 @@ FirmXplore/
   reports/        # Local generated reports, ignored by Git
 ```
 
-## 🤝 Team &amp; Support
+## 🤝 Team & Support
 
-&lt;p align="left"&gt;
-  &lt;img src="./assets/Falcons.png" height="30" style="vertical-align: middle;" alt="Falcons Lab"/&gt;
-  &lt;strong style="margin-left: 8px;"&gt;Falcons Lab&lt;/strong&gt;
-  &lt;img src="./assets/CTRA.png" height="30" style="vertical-align: middle; margin-left: 40px;" alt="CTRA@DGSSZ"/&gt;
-  &lt;strong style="margin-left: 8px;"&gt;CTRA@DGSSZ&lt;/strong&gt;
-&lt;/p&gt;
+<p align="left">
+  <img src="./assets/Falcons.png" height="30" style="vertical-align: middle;" alt="Falcons Lab"/>
+  <strong style="margin-left: 8px;">Falcons Lab</strong>
+  <img src="./assets/CTRA.png" height="30" style="vertical-align: middle; margin-left: 40px;" alt="CTRA@DGSSZ"/>
+  <strong style="margin-left: 8px;">CTRA@DGSSZ</strong>
+</p>
 
-&lt;table&gt;
-  &lt;tr&gt;
-    &lt;td align="center" width="90"&gt;
-      &lt;a href="https://github.com/zer0ptr"&gt;
-        &lt;img src="https://avatars.githubusercontent.com/u/196273893?v=4" width="70px" alt="Hailin Zheng"/&gt;
-      &lt;/a&gt;&lt;br/&gt;
-      &lt;a href="mailto:iszhenghailin@gmail.com"&gt;&lt;sub&gt;&lt;b&gt;Hailin Zheng&lt;/b&gt;&lt;/sub&gt;&lt;/a&gt;
-    &lt;/td&gt;
-    &lt;td align="center" width="90"&gt;
-      &lt;a href="https://github.com/colorfulbird3"&gt;
-        &lt;img src="https://avatars.githubusercontent.com/u/221922291?v=4" width="70px" alt="Qingyi Huang"/&gt;
-      &lt;/a&gt;&lt;br/&gt;
-      &lt;a href="mailto:a1396228851@outlook.com"&gt;&lt;sub&gt;&lt;b&gt;Qingyi Huang&lt;/b&gt;&lt;/sub&gt;&lt;/a&gt;
-    &lt;/td&gt;
-    &lt;td align="center" width="90"&gt;
-      &lt;a href="https://github.com/Fa2maZ"&gt;
-        &lt;img src="https://avatars.githubusercontent.com/u/284943533?v=4" width="70px" alt="Guandong Li"/&gt;
-      &lt;/a&gt;&lt;br/&gt;
-      &lt;sub&gt;&lt;b&gt;Guandong Li&lt;/b&gt;&lt;/sub&gt;
-    &lt;/td&gt;
-  &lt;/tr&gt;
-&lt;/table&gt;
+<table>
+  <tr>
+    <td align="center" width="90">
+      <a href="https://github.com/zer0ptr">
+        <img src="https://avatars.githubusercontent.com/u/196273893?v=4" width="70px" alt="Hailin Zheng"/>
+      </a><br/>
+      <a href="mailto:iszhenghailin@gmail.com"><sub><b>Hailin Zheng</b></sub></a>
+    </td>
+    <td align="center" width="90">
+      <a href="https://github.com/colorfulbird3">
+        <img src="https://avatars.githubusercontent.com/u/221922291?v=4" width="70px" alt="Qingyi Huang"/>
+      </a><br/>
+      <a href="mailto:a1396228851@outlook.com"><sub><b>Qingyi Huang</b></sub></a>
+    </td>
+    <td align="center" width="90">
+      <a href="https://github.com/Fa2maZ">
+        <img src="https://avatars.githubusercontent.com/u/284943533?v=4" width="70px" alt="Guandong Li"/>
+      </a><br/>
+      <sub><b>Guandong Li</b></sub>
+    </td>
+  </tr>
+</table>
 
 ## 📜 License
 
 This project is configured as MIT in `pyproject.toml`.
-</code></pre>
