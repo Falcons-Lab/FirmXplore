@@ -535,7 +535,7 @@ def prepare_service_rootfs(
 ) -> dict[str, Any]:
     source = Path(source_rootfs)
     target = Path(service_rootfs)
-    marker = target / ".deepduck-runtime-copy.json"
+    marker = target / ".firmxplore-runtime-copy.json"
     if target.exists() and not marker.exists():
         shutil.rmtree(target, ignore_errors=True)
     reused = target.exists() and marker.exists()

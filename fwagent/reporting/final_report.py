@@ -13,7 +13,7 @@ from fwagent.dynamic.models import is_canonical_runtime_evidence
 from fwagent.findings import FindingClaimGuard, FINDING_STATUSES
 
 
-REPORT_SCHEMA_VERSION = "deepduck.report.v1"
+REPORT_SCHEMA_VERSION = "firmxplore.report.v1"
 
 
 def utc_now_iso() -> str:
@@ -58,6 +58,11 @@ class AnalysisReport:
     components: list[dict[str, Any]] = field(default_factory=list)
     attack_surface: list[dict[str, Any]] = field(default_factory=list)
     hypotheses: list[dict[str, Any]] = field(default_factory=list)
+    model_investigation: dict[str, Any] = field(default_factory=dict)
+    model_hypotheses: list[dict[str, Any]] = field(default_factory=list)
+    model_evidence: list[dict[str, Any]] = field(default_factory=list)
+    user_skipped_stages: list[str] = field(default_factory=list)
+    taint_quality: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +86,11 @@ class AnalysisReport:
             "findings": self.findings,
             "hypotheses": self.hypotheses,
             "validation": self.validation,
+            "model_investigation": self.model_investigation,
+            "model_hypotheses": self.model_hypotheses,
+            "model_evidence": self.model_evidence,
+            "user_skipped_stages": self.user_skipped_stages,
+            "taint_quality": self.taint_quality,
             "pipeline_stages": self.pipeline_stages,
             "coverage": self.coverage,
             "validation_gaps": self.validation_gaps,
@@ -150,18 +160,30 @@ class ReportGenerator:
         hypotheses = self._load("dynamic/hypotheses.json") or []
         evidence = self._load("dynamic/evidence/evidence.json") or []
         runtime_summary = self._load("dynamic/runtime_summary.json") or {}
+        # 动态可行性兜底（P2-2）：动态阶段未运行时读取静态可行性评估，
+        # 把笼统的 "not_assessed" 替换为具体原因。
+        if not runtime_summary.get("dynamic_feasibility"):
+            feasibility = self._load("dynamic/feasibility.json") or {}
+            if feasibility:
+                runtime_summary["dynamic_feasibility"] = str(feasibility.get("assessment") or "not_assessed")
+                if feasibility.get("reasons"):
+                    runtime_summary["dynamic_feasibility_reasons"] = feasibility["reasons"]
+                runtime_summary["dynamic_feasibility_method"] = feasibility.get("method", "static_heuristic")
+        # 模型调查成果（P3）：PiAgent 的输出（provider-backed、非 canonical），
+        # 让用户从报告中直接看到模型做了什么、消耗了多少步。
+        model_investigation = self._load("reports/investigation.json") or {}
         findings_payload = findings_payload or self._load("findings/findings.json") or {"findings": []}
         findings = findings_payload.get("findings") or []
         evidence_ids = [item.get("id") for item in evidence if item.get("id")]
         metadata = {
             "schema_version": REPORT_SCHEMA_VERSION,
-            "deepduck_version": __version__,
+            "firmxplore_version": __version__,
             "task_id": self.task_id,
             "generated_at": utc_now_iso(),
             "analysis_status": analysis_status,
             "host_mode": "Windows + Docker",
-            "static_worker_image": "fwagent-round2:latest",
-            "dynamic_worker_image": "fwagent-round2:latest",
+            "static_worker_image": "firmxplore:latest",
+            "dynamic_worker_image": "firmxplore:latest",
             "provider_backed": False,
             "planner": "deterministic",
             "real_model_validation": "deferred",
@@ -200,7 +222,111 @@ class ReportGenerator:
             components=(graph_full.get("components") if isinstance(graph_full, dict) else []) or [],
             attack_surface=entries,
             hypotheses=hypotheses,
+            model_investigation=self._model_investigation_summary(model_investigation),
+            model_hypotheses=self._model_hypotheses(model_investigation),
+            model_evidence=self._model_evidence(model_investigation),
+            user_skipped_stages=(pipeline.get("user_skipped_stages") if isinstance(pipeline, dict) else []) or [],
+            taint_quality=self._taint_quality(taint),
         )
+
+    def _model_investigation_summary(self, trace: dict[str, Any]) -> dict[str, Any]:
+        """把 PiAgent 输出压缩为报告的 model_investigation 段落（P3）。
+
+        provider-backed 结果在确定性 Round-5 中仍是非 canonical 的，
+        这里只做透明呈现：模型跑了多少步、产出了什么、停在哪里。
+        """
+        if not trace or trace.get("steps") is None:
+            return {}
+        model_info = trace.get("model") or {}
+        summary_obj = {
+            "provider": model_info.get("provider"),
+            "model": model_info.get("model"),
+            "steps": trace.get("steps"),
+            "tool_calls": trace.get("tool_calls"),
+            "stop_reason": trace.get("stop_reason"),
+            "model_error": trace.get("model_error"),
+            "degraded_reason": trace.get("model_error") if trace.get("degraded") else None,
+            "last_error": (trace.get("model_errors") or [None])[-1] if trace.get("model_errors") else trace.get("model_error"),
+            "total_tokens": self._model_usage_total(),
+            "degraded": bool(trace.get("degraded")),
+            "evidence_produced": len(trace.get("evidence") or []),
+            "hypotheses_produced": len(trace.get("hypotheses") or []),
+            "canonical": False,
+            "note": "model-assisted results are non-canonical in deterministic Round 5; see reports/investigation.json for the full trace",
+        }
+        return summary_obj
+
+    def _model_usage_total(self) -> int:
+        """聚合 web_model_usage.jsonl 的总 token 消耗（P1-1(b)）。"""
+        usage_path = self.task_dir / "web_model_usage.jsonl"
+        if not usage_path.exists():
+            return 0
+        total = 0
+        try:
+            for line in usage_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                total += int(record.get("total_tokens") or 0)
+        except OSError:
+            return 0
+        return total
+
+    def _model_hypotheses(self, trace: dict[str, Any]) -> list[dict[str, Any]]:
+        """PiAgent 的假设清单（P1-1）。明确 canonical=False，不进入 findings。"""
+        out = []
+        for item in trace.get("hypotheses") or []:
+            if not isinstance(item, dict):
+                continue
+            out.append({
+                "id": item.get("id"),
+                "title": item.get("title"),
+                # PiAgent 的 Hypothesis 没有独立 rationale 字段，用 claim 语义的
+                # title + missing_evidence 承载推理说明（适配说明见实现注释）
+                "rationale": item.get("title"),
+                "status": item.get("status"),
+                "confidence": item.get("confidence"),
+                "evidence_ids": item.get("evidence_ids") or [],
+                "missing_evidence": item.get("missing_evidence") or [],
+                "canonical": False,
+            })
+        return out
+
+    def _model_evidence(self, trace: dict[str, Any]) -> list[dict[str, Any]]:
+        """PiAgent 的证据清单（P1-1）：id / type / description / source。"""
+        out = []
+        for item in trace.get("evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            out.append({
+                "id": item.get("id"),
+                "type": item.get("type"),
+                "description": item.get("description"),
+                "source": item.get("source_tool"),
+                "binary": item.get("binary"),
+                "confidence": item.get("confidence"),
+            })
+        return out
+
+    def _taint_quality(self, taint: dict[str, Any]) -> dict[str, Any]:
+        """污点路径质量段落（P1-2）：区分合成路径与真实数据流。"""
+        if not isinstance(taint, dict) or not taint:
+            return {}
+        return {
+            "source_count": taint.get("sources", 0),
+            "sink_count": taint.get("sinks", 0),
+            "candidate_path_count": taint.get("candidate_paths", 0),
+            "argument_mapped_path_count": taint.get("argument_mapped_paths", 0),
+            "decompile_backed_path_count": taint.get("decompile_backed_paths", 0),
+            "callgraph_synthetic_path_count": taint.get("callgraph_synthetic_paths", 0),
+            "quality_note": (
+                "callgraph_synthetic paths are reachability chains from Ghidra call graphs; "
+                "argument-level data flow is NOT established unless argument_mapped_path_count > 0"
+            ),
+        }
 
     def generate_json(self, model: AnalysisReport) -> Path:
         path = self.reports_dir / "report.json"
@@ -230,7 +356,7 @@ class ReportGenerator:
         stage_rows = self._stage_markdown(model.pipeline_stages)
         coverage = model.coverage or {}
         lines = [
-            "# DeepDuck Firmware Security Analysis Report",
+            "# FirmXplore Firmware Security Analysis Report",
             "",
             "## 1. Executive Summary",
             "",
@@ -356,7 +482,7 @@ class ReportGenerator:
     def _legacy_generate_markdown_unused(self, model: AnalysisReport) -> Path:
         path = self.reports_dir / "report.md"
         lines = [
-            "# DeepDuck Firmware Security Analysis Report",
+            "# FirmXplore Firmware Security Analysis Report",
             "",
             "## Analysis Scope",
             "",
@@ -461,7 +587,7 @@ class ReportGenerator:
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>DeepDuck Firmware Security Analysis Report</title>
+<title>FirmXplore Firmware Security Analysis Report</title>
 <style>
 body {{ font-family: Segoe UI, Arial, sans-serif; margin: 2rem; color: #1f2937; background: #f8fafc; }}
 h1, h2, h3 {{ color: #0f172a; }}
@@ -476,7 +602,7 @@ code {{ background: #e2e8f0; padding: .1rem .25rem; border-radius: 4px; }}
 </style>
 </head>
 <body>
-<h1>DeepDuck Firmware Security Analysis Report</h1>
+<h1>FirmXplore Firmware Security Analysis Report</h1>
 <p>Local isolated analysis. Reachability does not imply exploitability. No public target scanning was performed.</p>
 <div class="cards">
 <div class="card"><strong>Task</strong><br>{html.escape(str(model.metadata.get('task_id')))}</div>

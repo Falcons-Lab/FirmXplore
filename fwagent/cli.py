@@ -36,14 +36,14 @@ from fwagent.tools.ghidra_api import BinaryToolAPI
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="deepduck", description="DeepDuck firmware security analysis pipeline")
-    parser.add_argument("--version", action="version", version=f"deepduck {__version__}")
+    parser = argparse.ArgumentParser(prog="firmxplore", description="FirmXplore firmware security analysis pipeline")
+    parser.add_argument("--version", action="version", version=f"firmxplore {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    doctor = subparsers.add_parser("doctor", help="Check DeepDuck Docker/container analysis environment")
+    doctor = subparsers.add_parser("doctor", help="Check FirmXplore Docker/container analysis environment")
     doctor.add_argument("--dynamic", action="store_true", help="Include dynamic worker checks")
 
-    analyze = subparsers.add_parser("analyze", help="Run DeepDuck firmware analysis")
+    analyze = subparsers.add_parser("analyze", help="Run FirmXplore firmware analysis")
     analyze.add_argument("firmware_file", help="Firmware image or archive to analyze")
     analyze.add_argument("--workspace", default="workspace", help="Workspace root directory")
     analyze.add_argument("--timeout", type=int, default=600, help="Extraction timeout in seconds")
@@ -1312,9 +1312,9 @@ def main(argv: list[str] | None = None) -> int:
             version = controller.ensure_available()
             builds = []
             if args.image in {"static", "all"}:
-                builds.append(controller.build_image("fwagent-round2:latest", "Dockerfile", "."))
+                builds.append(controller.build_image("firmxplore:latest", "Dockerfile", "."))
             if args.image in {"dynamic", "all"}:
-                builds.append(controller.build_image("fwagent-round3-dynamic:latest", "docker/Dockerfile.dynamic", "."))
+                builds.append(controller.build_image("firmxplore-dynamic:latest", "docker/Dockerfile.dynamic", "."))
         except DockerUnavailableError as exc:
             print(str(exc))
             return 1
@@ -1917,9 +1917,9 @@ def _format_pipeline_summary(result: dict) -> str:
     duration = result.get("duration") or {}
     platform = result.get("platform") or {}
     lines = [
-        f"DeepDuck v{__version__}",
+        f"FirmXplore v{__version__}",
         "",
-        "DeepDuck Analysis Complete" if result.get("success") else "DeepDuck Analysis Failed",
+        "FirmXplore Analysis Complete" if result.get("success") else "FirmXplore Analysis Failed",
         "",
         f"Task: {result.get('task_id') or task.get('task_id') or 'unknown'}",
         f"Firmware: {task.get('firmware_name') or 'unknown'}",
@@ -1956,7 +1956,7 @@ def _format_final_report_summary(report: dict) -> str:
     metadata = report.get("metadata") or {}
     return "\n".join(
         [
-            "DeepDuck Final Report",
+            "FirmXplore Final Report",
             f"Task: {report.get('task_id') or metadata.get('task_id')}",
             f"Status: {report.get('analysis_status')}",
             f"Findings: {summary.get('findings', 0)}",
@@ -2028,7 +2028,7 @@ def _format_model_doctor(status: dict) -> str:
     metadata = status.get("metadata") or {}
     tool = status.get("tool_calling") or {}
     lines = [
-        "DeepDuck Model Provider Check",
+        "FirmXplore Model Provider Check",
         "",
         f"Provider: {status.get('provider') or 'missing'}",
         f"Model: {status.get('model') or 'missing'}",

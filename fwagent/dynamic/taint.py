@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
@@ -13,6 +14,15 @@ from fwagent.dynamic.correlation import CanonicalStateGuard, ComponentGraphBuild
 from fwagent.dynamic.models import DynamicEvidence
 from fwagent.dynamic.surface import AttackSurfaceBuilder
 from fwagent.dynamic.workspace import DynamicWorkspace
+
+logger = logging.getLogger(__name__)
+
+# 无攻击面入口时的静态污点源兜底（P1）：从 Ghidra 证据里识别
+# "接收外部输入"的函数调用，直接标记为污点源，避免 56 sink / 0 source 的断链。
+_READ_FUNCS = (
+    "recv", "recvfrom", "recvmsg", "read", "fread", "fgets",
+    "gets", "getenv", "getchar",
+)
 
 
 SOURCE_TYPES = {
@@ -425,6 +435,13 @@ class TaintAnalysisSummary:
     source_types: dict[str, int]
     sink_types: dict[str, int]
     safety_notes: list[str]
+    # P1-2：路径质量统计——让读者一眼区分合成路径与真实数据流
+    # argument_mapped_paths: 带参数级映射（argument_mapping 非空）的路径数
+    # decompile_backed_paths: 证据引用了反编译产物的路径数
+    # callgraph_synthetic_paths: 由 callgraph 链合成（TP-GEN-）的路径数
+    argument_mapped_paths: int = 0
+    decompile_backed_paths: int = 0
+    callgraph_synthetic_paths: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -664,7 +681,7 @@ class TaintAnalysisBuilder:
         links = self._link_hypotheses(sources, sinks, paths)
         source_catalog = self._source_catalog(sources)
         sink_catalog = self._sink_catalog(sinks)
-        summary = self._summary(sources, sinks, paths, sanitizers)
+        summary = self._summary(sources, sinks, paths, sanitizers, data_flow_evidence)
         contexts = self._contexts(sources, sinks, paths, sanitizers, links)
         payload = {
             "success": True,
@@ -786,16 +803,27 @@ class TaintAnalysisBuilder:
         for entry in entries.values():
             entry_id = str(entry.get("entry_id") or "")
             protocol = str(entry.get("protocol") or entry.get("entry_type") or "").lower()
+            entry_type = str(entry.get("entry_type") or "").lower()
             if entry_id in {"EP-HTTPS-lighttpd-device-manager", "EP-LOOPBACK-FCGI-44171", "EP-STDIN-ret2text"}:
                 continue
             if protocol not in {"http", "https", "fastcgi", "tcp", "udp"} and "http" not in entry_id.lower():
                 continue
+            # P0-2(c)：component_id 为 null 时回退到 handler_component_id；
+            # P0-2(d)：CGI/脚本入口区分"HTTP 请求参数"与"原始 TCP 流"
+            # （spec 中的 http_param 在 SOURCE_TYPES 枚举里对应 cgi_parameter / http_parameter）。
+            if entry_type == "cgi":
+                source_type = "cgi_parameter"
+            elif entry_type == "http_route":
+                source_type = "http_parameter"
+            else:
+                source_type = "tcp_stream" if protocol in {"http", "https", "tcp", "fastcgi"} else "udp_datagram" if protocol == "udp" else "unknown"
+            handler_component_id = entry.get("handler_component_id") or entry.get("component_id")
             sources.append(
                 InputSourceDescriptor(
                     source_id=f"SRC-{_slug(entry_id)}-REQUEST",
-                    source_type="tcp_stream" if protocol in {"http", "https", "tcp", "fastcgi"} else "udp_datagram" if protocol == "udp" else "unknown",
+                    source_type=source_type,
                     entry_point_id=entry_id,
-                    component_id=entry.get("handler_component_id") or entry.get("component_id"),
+                    component_id=handler_component_id,
                     function_name=str(entry.get("name") or "request handler"),
                     parameter_name="request",
                     protocol=entry.get("protocol"),
@@ -863,6 +891,60 @@ class TaintAnalysisBuilder:
                     runtime_confirmed=False,
                     evidence_ids=ret_entry.get("evidence_ids", []),
                     confidence=ret_entry.get("confidence", 0.5),
+                    provenance="real_static_analysis",
+                )
+            )
+        if not sources:
+            fallback = self._static_source_fallback()
+            if fallback:
+                logger.warning(
+                    "no attack surface entries; using %d static callgraph sources as taint sources",
+                    len(fallback),
+                )
+            sources.extend(fallback)
+        return sources
+
+    def _static_source_fallback(self) -> list[InputSourceDescriptor]:
+        """攻击面为空时的兜底污点源：从 Ghidra 证据标记外部输入接收点。
+
+        evidence id 形如 SE-GHIDRA-sbin-httpd-recv，末段即函数名；
+        与 _READ_FUNCS 匹配的调用点视为外部输入 source。
+        """
+        sources: list[InputSourceDescriptor] = []
+        evidence_path = self.workspace.task_dir / "ghidra" / "evidence.json"
+        if not evidence_path.exists():
+            return sources
+        try:
+            records = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return sources
+        if isinstance(records, dict):
+            records = records.get("evidence") or []
+
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            ev_id = str(item.get("id") or "")
+            binary = str((item.get("metadata") or {}).get("binary") or "")
+            if not ev_id or not binary:
+                continue
+            func = ev_id.rsplit("-", 1)[-1].lower()
+            if not any(rf == func or func.startswith(rf) for rf in _READ_FUNCS):
+                continue
+            binary_name = Path(binary).name
+            sources.append(
+                InputSourceDescriptor(
+                    source_id=f"SRC-STATIC-{_slug(ev_id)}",
+                    source_type="tcp_stream",
+                    entry_point_id=None,
+                    component_id=self.graph.resolve_component_id(binary_name) if self.graph else None,
+                    function_name=func,
+                    parameter_name="request",
+                    protocol="tcp",
+                    origin=f"static_callgraph: {binary_name}",
+                    runtime_confirmed=False,
+                    evidence_ids=[ev_id],
+                    confidence=0.55,
                     provenance="real_static_analysis",
                 )
             )
@@ -1025,6 +1107,13 @@ class TaintAnalysisBuilder:
                     runtime_sink_confirmed=False,
                 )
             )
+        # ------------------------------------------------------------------
+        # 通用 L2 路径合成：在 Ghidra callgraph 中搜索
+        # "外部输入接收点 → 危险函数" 的可达调用链（深度受限）。
+        # 打通 通用source → 通用sink → 假设 → 发现 的完整链路，
+        # 不再依赖 ret2text / FastCGI 硬编码特例。
+        # ------------------------------------------------------------------
+        paths.extend(self._generic_callgraph_paths(sources, sinks, graph, data_flow_evidence))
         fcgi_sources = [item for item in sources if item.source_id.startswith("SRC-FCGI")]
         fcgi_sinks = [item for item in sinks if item.sink_id.startswith("SINK-FCGI")]
         runtime_handler_ids = [evidence.id for evidence in self.dynamic_evidence if evidence.type in {"handler_reached", "fastcgi_application_response", "application_response"}]
@@ -1075,7 +1164,201 @@ class TaintAnalysisBuilder:
                         runtime_sink_confirmed=False,
                     )
                 )
+        paths = self._cap_generic_paths(paths)
         return paths[: self.config.taint.max_paths], data_flow_evidence, graph
+
+    def _cap_generic_paths(self, paths: list[TaintPath]) -> list[TaintPath]:
+        """通用路径的防洪水截断：每个 sink 只保留置信度最高的一条来源。"""
+        best_by_sink: dict[str, TaintPath] = {}
+        fixed: list[TaintPath] = []
+        for path in paths:
+            if path.path_id.startswith("TP-GEN-"):
+                sink_id = path.sink_id
+                current = best_by_sink.get(sink_id)
+                if current is None or path.confidence > current.confidence:
+                    best_by_sink[sink_id] = path
+            else:
+                fixed.append(path)
+        generics = sorted(best_by_sink.values(), key=lambda p: p.confidence, reverse=True)
+        return fixed + generics
+
+    def _generic_callgraph_paths(
+        self,
+        sources: list[InputSourceDescriptor],
+        sinks: list[SensitiveSink],
+        graph: TaintGraph,
+        data_flow_evidence: list[DataFlowEvidence],
+    ) -> list[TaintPath]:
+        """在 Ghidra callgraph 中搜索"网络输入接收函数 → 危险函数"的可达调用链。
+
+        起点不是 source 描述符里的抽象函数名（入口描述符没有真实函数名），
+        而是 callgraph 中实际调用 recv/recvfrom/read/fgets 等接收函数的 caller——
+        那是二进制接收外部输入的真实位置。证据级别 L2_reachable_call_chain：
+        调用链真实存在，但参数传播关系未验证（L3 需要反编译级数据流）。
+        每个 sink 只保留最优链（见 _cap_generic_paths），防止候选洪水。
+        """
+        callgraphs = self._load_callgraphs()
+        if not callgraphs:
+            return []
+
+        generated: list[TaintPath] = []
+        for sink in sinks:
+            if not sink.callee_name:
+                continue
+            binary_name = self._sink_binary_name(sink)
+            adjacency = callgraphs.get(binary_name)
+            if not adjacency:
+                continue
+            # 该二进制的"外部输入接收 caller"（调用了 recv/read/... 的函数）
+            entry_callers = self._network_entry_callers(adjacency)
+            if not entry_callers:
+                continue
+            # 绑定该二进制的最佳 source 描述符（保持 source/sink 语义与统计）
+            source = self._source_for_binary(sources, sink.component_id, binary_name)
+            if source is None:
+                continue
+            best_chain: list[str] | None = None
+            for caller in sorted(entry_callers):
+                chain = self._callgraph_chain(adjacency, caller, sink.callee_name, max_depth=4)
+                if chain and (best_chain is None or len(chain) < len(best_chain)):
+                    best_chain = chain
+            if not best_chain:
+                continue
+
+            confidence = round(min(source.confidence, sink.confidence) * 0.75, 3)
+            src_tag = _slug(source.source_id)[:24]
+            edge_id = f"TE-GEN-{src_tag}-{_slug(sink.sink_id)}"
+            graph.add_edge(TaintEdge(edge_id, source.source_id, sink.sink_id, "calls_with", sorted(set(source.evidence_ids + sink.evidence_ids)), confidence))
+            path_id = f"TP-GEN-{src_tag}-{_slug(sink.sink_id)}"
+            evidence = DataFlowEvidence(
+                evidence_id=f"DFE-{_slug(path_id)}",
+                source_id=source.source_id,
+                sink_id=sink.sink_id,
+                function=" -> ".join(best_chain[:4]),
+                observation_type="callgraph_reachable_input_to_sink",
+                decompile_excerpt_summary=(
+                    f"network input receiver {best_chain[0]} reaches {sink.callee_name} in {binary_name} "
+                    f"via {' -> '.join(best_chain[:5])}; callchain-level evidence, arguments unverified"
+                ),
+                argument_mapping={},
+                call_chain=best_chain,
+                confidence=confidence,
+                artifact_reference=f"ghidra callgraph: {binary_name}",
+                evidence_level="L2_reachable_call_chain",
+            )
+            data_flow_evidence.append(evidence)
+            generated.append(
+                TaintPath(
+                    path_id=path_id,
+                    source_id=source.source_id,
+                    sink_id=sink.sink_id,
+                    component_ids=[source.component_id or sink.component_id or "", sink.component_id or ""],
+                    function_chain=best_chain,
+                    taint_edges=[edge_id],
+                    sanitizers=[],
+                    transformations=[],
+                    evidence_ids=sorted(set(source.evidence_ids + sink.evidence_ids)),
+                    confidence=confidence,
+                    path_state="candidate",
+                    interprocedural=len(best_chain) > 2,
+                    runtime_supported=False,
+                    entry_point_id=source.entry_point_id,
+                    evidence_level="L2_reachable_call_chain",
+                    runtime_sink_confirmed=False,
+                )
+            )
+        return generated
+
+    def _sink_binary_name(self, sink: SensitiveSink) -> str | None:
+        if sink.binary_path:
+            return Path(sink.binary_path).name
+        return None
+
+    def _network_entry_callers(self, adjacency: dict[str, set[str]]) -> set[str]:
+        """调用了外部输入接收函数（recv/read/...）的 caller 集合。"""
+        callers: set[str] = set()
+        for caller, callees in adjacency.items():
+            for callee in callees:
+                low = callee.lower()
+                if any(low == rf or low.startswith(rf) for rf in _READ_FUNCS):
+                    callers.add(caller)
+                    break
+        return callers
+
+    def _source_for_binary(
+        self, sources: list[InputSourceDescriptor], component_id: str | None, binary_name: str
+    ) -> InputSourceDescriptor | None:
+        """为 sink 挑选同一二进制的 source 描述符。
+
+        组件 id 尾段是二进制名（C-BINARY-sbin-httpd → httpd，
+        C-SERVICE-httpd → httpd，C-BINARY-htdocs-cgibin → cgibin），
+        只接受尾段精确匹配，避免出现 "telnetd source → cgibin sink" 的错误关联。
+        """
+        if not component_id:
+            return None
+        sink_token = self._component_binary_token(component_id)
+        if not sink_token:
+            return None
+        best: InputSourceDescriptor | None = None
+        for source in sources:
+            if source.source_id.startswith("SRC-RET2TEXT") or not source.component_id:
+                continue
+            if self._component_binary_token(source.component_id) != sink_token:
+                continue
+            if best is None or source.confidence > best.confidence:
+                best = source
+        return best
+
+    @staticmethod
+    def _component_binary_token(component_id: str) -> str:
+        return component_id.rstrip("/").split("-")[-1].lower() if component_id else ""
+
+    def _load_callgraphs(self) -> dict[str, dict[str, set[str]]]:
+        """从 ghidra/analysis_summary.json 提取每二进制的 caller→callee 邻接表。"""
+        summary_path = self.workspace.task_dir / "ghidra" / "analysis_summary.json"
+        if not summary_path.exists():
+            return {}
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        result: dict[str, dict[str, set[str]]] = {}
+        for analysis in summary.get("analyses") or []:
+            binary = str(analysis.get("binary") or "")
+            if not binary:
+                continue
+            edges = (analysis.get("result") or {}).get("callgraph") or []
+            adjacency: dict[str, set[str]] = {}
+            for edge in edges:
+                caller = str(edge.get("caller") or "")
+                callee = str(edge.get("callee") or "")
+                if caller and callee:
+                    adjacency.setdefault(caller, set()).add(callee)
+            if adjacency:
+                result[Path(binary).name] = adjacency
+        return result
+
+    @staticmethod
+    def _callgraph_chain(adjacency: dict[str, set[str]], start: str, goal: str, *, max_depth: int) -> list[str] | None:
+        """BFS：start 函数到 goal 函数的调用链；找不到返回 None。"""
+        if start == goal:
+            return [start]
+        from collections import deque as _deque
+
+        queue = _deque([[start]])
+        seen = {start}
+        while queue:
+            chain = queue.popleft()
+            if len(chain) > max_depth:
+                continue
+            for callee in adjacency.get(chain[-1], ()):
+                nxt = chain + [callee]
+                if callee == goal:
+                    return nxt
+                if callee not in seen:
+                    seen.add(callee)
+                    queue.append(nxt)
+        return None
 
     def _link_hypotheses(
         self,
@@ -1157,7 +1440,20 @@ class TaintAnalysisBuilder:
         sinks: list[SensitiveSink],
         paths: list[TaintPath],
         sanitizers: list[SanitizerDescriptor],
+        data_flow_evidence: list[DataFlowEvidence] | None = None,
     ) -> TaintAnalysisSummary:
+        dfe_by_path: dict[str, dict[str, Any]] = {}
+        for item in data_flow_evidence or []:
+            for path_id in [p for p in [item.path_id] if p] if hasattr(item, "path_id") else []:
+                dfe_by_path[path_id] = item.to_dict()
+        # DataFlowEvidence 没有 path_id 字段时按 source_id+sink_id 关联
+        for item in data_flow_evidence or []:
+            dfe_by_path.setdefault(f"{item.source_id}|{item.sink_id}", item.to_dict())
+        mapped_path_ids = {
+            dfe.get("source_id", "")
+            for dfe in dfe_by_path.values()
+            if dfe.get("argument_mapping")
+        }
         return TaintAnalysisSummary(
             sources=len(sources),
             sinks=len(sinks),
@@ -1169,6 +1465,18 @@ class TaintAnalysisBuilder:
             high_priority_paths=sum(1 for path in paths if path.confidence >= 0.75 and path.sink_id),
             source_types=dict(sorted(Counter(source.source_type for source in sources).items())),
             sink_types=dict(sorted(Counter(sink.sink_type for sink in sinks).items())),
+            argument_mapped_paths=sum(
+                1 for path in paths
+                if any(
+                    dfe.get("source_id") == path.source_id and dfe.get("sink_id") == path.sink_id and dfe.get("argument_mapping")
+                    for dfe in dfe_by_path.values()
+                )
+            ),
+            decompile_backed_paths=sum(
+                1 for path in paths
+                if any("decompile" in str(ev_id).lower() for ev_id in path.evidence_ids)
+            ),
+            callgraph_synthetic_paths=sum(1 for path in paths if path.path_id.startswith("TP-GEN-")),
             safety_notes=[
                 "SOURCE + SINK != VULNERABILITY",
                 "CALL PATH != DATA FLOW",

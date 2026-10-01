@@ -1,7 +1,7 @@
 services:
-  fwagent:
+  firmxplore:
     build: .
-    image: fwagent-round2:latest
+    image: firmxplore:latest
     network_mode: "none"
     working_dir: /work
     volumes:
@@ -9,17 +9,17 @@ services:
     mem_limit: 2g
     pids_limit: 256
     cpus: 2
-    entrypoint: ["fwagent"]
+    entrypoint: ["firmxplore"]
   ghidra-base:
     build:
       context: .
       dockerfile: docker/Dockerfile.base
-    image: fwagent-ghidra-base:latest
+    image: firmxplore-ghidra-base:latest
   ghidra-worker:
     build:
       context: .
       dockerfile: docker/Dockerfile.ghidra
-    image: fwagent-ghidra-worker:latest
+    image: firmxplore-ghidra-worker:latest
     network_mode: "none"
     working_dir: /workspace
     volumes:
@@ -32,7 +32,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.dynamic
-    image: fwagent-round3-dynamic:latest
+    image: firmxplore-dynamic:latest
     network_mode: "bridge"
     working_dir: /work
     volumes:

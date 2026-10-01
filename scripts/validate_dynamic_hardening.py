@@ -177,7 +177,7 @@ def summarize_accepted_integration(workspace: DynamicWorkspace, rootfs_artifact:
     summary = {
         "selected_dynamic_service": application,
         "selected_binary": selected_binary,
-        "container_image": "fwagent-round2:latest (accepted artifact provenance)",
+        "container_image": "firmxplore:latest (accepted artifact provenance)",
         "startup_method": "externally managed firmware FastCGI child with reconstructed lighttpd routing",
         "architecture": rootfs_artifact.get("architecture"),
         "endianness": rootfs_artifact.get("endianness"),
@@ -299,7 +299,7 @@ def validate_task(workspace_root: Path, task_id: str) -> dict[str, Any]:
     summary = {
         "selected_dynamic_service": service_name,
         "selected_binary": selected["binary"],
-        "container_image": "fwagent-round2:latest",
+        "container_image": "firmxplore:latest",
         "startup_method": (
             backend._load_or_reconstruct_profile(service_name).startup_source
             or "direct firmware executable; vendor startup command not recovered"

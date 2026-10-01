@@ -35,5 +35,5 @@ def host_and_container_paths(path: str | Path, mounts: list[tuple[str, str]] | N
     }
 
 
-def default_mounts(project_host: str | Path = "D:\\Git-Projects\\DeepDuck") -> list[tuple[str, str]]:
+def default_mounts(project_host: str | Path = "D:\\Git-Projects\\FirmXplore") -> list[tuple[str, str]]:
     return [(str(project_host), "/work")]

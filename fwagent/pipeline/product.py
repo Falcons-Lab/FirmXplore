@@ -272,8 +272,8 @@ class AnalysisPipelineController:
         stage_results = {stage: PipelineStageResult(stage) for stage in V01_PIPELINE_STAGES}
 
         try:
-            self._run_stage(stage_results, "INPUT_PREPARE", timings, lambda: self._prepare_input_stage(task, source), progress, "[1/8] Preparing firmware\n[1/15] DeepDuck input preparation")
-            self._run_stage(stage_results, "ENVIRONMENT_CHECK", timings, lambda: self._environment_stage(task), progress, "[2/15] DeepDuck environment check")
+            self._run_stage(stage_results, "INPUT_PREPARE", timings, lambda: self._prepare_input_stage(task, source), progress, "[1/8] Preparing firmware\n[1/15] FirmXplore input preparation")
+            self._run_stage(stage_results, "ENVIRONMENT_CHECK", timings, lambda: self._environment_stage(task), progress, "[2/15] FirmXplore environment check")
 
             if not resume or not (task_dir / "reports" / "analysis.json").exists():
                 self._phase(task, "static_analysis", "running")
@@ -297,6 +297,14 @@ class AnalysisPipelineController:
                 self._block_stage(stage_results, "ROOTFS_INVENTORY", "no canonical rootfs established")
 
             inventory_ready = bool(inventory_result and inventory_result.get("success"))
+            if inventory_ready:
+                # 静态可行性评估（P2-2）：动态阶段未运行时为报告提供具体原因，
+                # 而不是笼统的 not_assessed。动态阶段已评估过时不覆盖。
+                try:
+                    from fwagent.dynamic.feasibility import write_if_missing
+                    write_if_missing(task_dir)
+                except Exception:  # noqa: BLE001  可行性评估失败不影响主流程
+                    pass
             if not inventory_ready:
                 self._block_stage(stage_results, "STATIC_TARGET_SELECTION", "no valid canonical rootfs inventory")
                 self._block_stage(stage_results, "GHIDRA_ANALYSIS", "no static targets because canonical rootfs inventory is unavailable")
@@ -361,7 +369,7 @@ class AnalysisPipelineController:
                 validation = ReportValidator().validate(model)
                 return report_paths, artifact_manifest, validation
 
-            report_paths, artifact_manifest, validation = self._run_stage(stage_results, "REPORT_GENERATION", timings, report_step, progress, "[14/15] Generating DeepDuck reports")
+            report_paths, artifact_manifest, validation = self._run_stage(stage_results, "REPORT_GENERATION", timings, report_step, progress, "[14/15] Generating FirmXplore reports")
             if not validation["success"]:
                 errors.append(self._error("REPORT_VALIDATION_FAILED", "; ".join(validation["errors"]), recoverable=False))
             if output_dir:
@@ -514,7 +522,7 @@ class AnalysisPipelineController:
         container_errors = container_ghidra.get("errors", [])
         payload = {
             "success": True,
-            "product": "DeepDuck",
+            "product": "FirmXplore",
             "python_package": "fwagent",
             "provider_backed": False,
             "real_model_validation": "deferred",
@@ -527,7 +535,7 @@ class AnalysisPipelineController:
             "static_elf_fallback": "available",
             "ghidra_worker_image": self.round2_config.ghidra.docker_image,
             "ghidra_blocking_reason": "; ".join(str(item) for item in container_errors) if container_errors else None,
-            "deepduck_console": True,
+            "firmxplore_console": True,
         }
         path = task_dir / "environment.json"
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -755,7 +763,7 @@ class AnalysisPipelineController:
     def _write_extraction_artifact(self, task_id: str, attempts: list[dict[str, Any]], rootfs: RootfsArtifact | None, *, selected_reason: str) -> Path:
         task_dir = self.workspace_root / task_id
         payload = {
-            "schema_version": "deepduck.extraction.v0.1",
+            "schema_version": "firmxplore.extraction.v0.1",
             "attempts": attempts,
             "selected_rootfs": rootfs.to_dict() if rootfs else None,
             "selection_reason": selected_reason,
@@ -1115,15 +1123,33 @@ class AnalysisPipelineController:
     def _write_pipeline_artifacts(self, task_id: str, stages: dict[str, PipelineStageResult], status: str) -> None:
         task_dir = self.workspace_root / task_id
         payload = {
-            "schema_version": "deepduck.pipeline.v0.1",
+            "schema_version": "firmxplore.pipeline.v0.1",
             "status": status,
             "stages": [stages[stage].to_dict() for stage in V01_PIPELINE_STAGES],
             "coverage": self._coverage_metrics(task_id, stages),
             "validation_gaps": self._validation_gaps(task_id, stages),
+            # P2-2：用户主动跳过的阶段单独列出，避免与流水线失败混淆
+            "user_skipped_stages": self._user_skipped_stages(task_id),
             "provider_backed": False,
             "real_model_validation": "deferred",
         }
         (task_dir / "pipeline_stages.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def _user_skipped_stages(self, task_id: str) -> list[str]:
+        """按 analysis_mode 列出用户主动跳过的阶段（P2-2）。
+
+        static-only / no-dynamic / fast 都是用户选择；这些阶段的 skipped 状态
+        是预期行为，不属于流水线缺陷。
+        """
+        task = self.load_task(task_id)
+        mode = getattr(task, "analysis_mode", None) or "normal"
+        if mode == "static-only":
+            return ["COMPONENT_CORRELATION", "ATTACK_SURFACE", "TAINT_CORRELATION", "HYPOTHESIS_SYNTHESIS", "PRIORITIZATION", "INVESTIGATION", "DYNAMIC_VALIDATION"]
+        if mode == "fast":
+            return ["STATIC_TARGET_SELECTION", "GHIDRA_ANALYSIS", "COMPONENT_CORRELATION", "ATTACK_SURFACE", "TAINT_CORRELATION", "HYPOTHESIS_SYNTHESIS", "PRIORITIZATION", "INVESTIGATION", "DYNAMIC_VALIDATION"]
+        if mode == "no-dynamic":
+            return ["INVESTIGATION", "DYNAMIC_VALIDATION"]
+        return []
 
     def _coverage_metrics(self, task_id: str, stages: dict[str, PipelineStageResult]) -> dict[str, Any]:
         task_dir = self.workspace_root / task_id
@@ -1372,6 +1398,7 @@ class AnalysisPipelineController:
             "stage_results": [stage_results[stage].to_dict() for stage in V01_PIPELINE_STAGES],
             "coverage": coverage,
             "validation_gaps": validation_gaps,
+            "user_skipped_stages": self._user_skipped_stages(task.task_id),
             "investigation_iterations": investigation.get("iterations", 0),
             "final_stop_reason": investigation.get("stop_reason") or "not_executed",
             "dynamic_executed": dynamic_executed,

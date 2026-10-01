@@ -100,7 +100,7 @@ class FakeGhidraRuntime:
             "success": True,
             "errors": [],
             "result": {
-                "image": "fwagent-round2:latest",
+                "image": "firmxplore:latest",
                 "java_version": "21.0.8",
                 "ghidra_version": "12.1.3",
                 "analyze_headless": "/opt/ghidra/support/analyzeHeadless",
@@ -108,7 +108,7 @@ class FakeGhidraRuntime:
         }
 
 
-class DeepDuckV01IntegrationTests(unittest.TestCase):
+class FirmXploreV01IntegrationTests(unittest.TestCase):
     def test_stage_order_contains_expected_terminal_stage(self) -> None:
         self.assertEqual(V01_PIPELINE_STAGES[-1], "COMPLETED")
         self.assertIn("GHIDRA_ANALYSIS", V01_PIPELINE_STAGES)
@@ -132,8 +132,8 @@ class DeepDuckV01IntegrationTests(unittest.TestCase):
         self.assertIn("fast", params)
         self.assertIn("deep", params)
 
-    def test_cli_prog_is_deepduck(self) -> None:
-        self.assertEqual(build_parser().prog, "deepduck")
+    def test_cli_prog_is_firmxplore(self) -> None:
+        self.assertEqual(build_parser().prog, "firmxplore")
 
     def test_cli_accepts_fast_flag(self) -> None:
         args = build_parser().parse_args(["analyze", "firmware.bin", "--fast"])
@@ -156,11 +156,11 @@ class DeepDuckV01IntegrationTests(unittest.TestCase):
             self.assertEqual(payload["containerized_ghidra"], "PASS")
             self.assertEqual(payload["static_elf_fallback"], "available")
 
-    def test_pyproject_exposes_deepduck_console_script(self) -> None:
+    def test_pyproject_exposes_firmxplore_console_script(self) -> None:
         text = Path("pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('deepduck = "fwagent.cli:main"', text)
+        self.assertIn('firmxplore = "fwagent.cli:main"', text)
 
-    def test_readme_uses_only_deepduck_product_name(self) -> None:
+    def test_readme_uses_only_firmxplore_product_name(self) -> None:
         text = Path("README.md").read_text(encoding="utf-8")
         self.assertIn("Deep Exploration and Evaluation Platform for Device Understanding, Correlation, and Knowledge", text)
         self.assertIn("arXiv", text)
@@ -226,7 +226,7 @@ class DeepDuckV01IntegrationTests(unittest.TestCase):
             stages = {name: PipelineStageResult(name, status="completed") for name in V01_PIPELINE_STAGES}
             AnalysisPipelineController(tmp)._write_pipeline_artifacts("t", stages, "COMPLETED_WITH_UNCERTAINTY")
             payload = json.loads((task / "pipeline_stages.json").read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema_version"], "deepduck.pipeline.v0.1")
+            self.assertEqual(payload["schema_version"], "firmxplore.pipeline.v0.1")
 
     def test_run_stage_respects_ghidra_partial_stage_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -318,13 +318,13 @@ class DeepDuckV01IntegrationTests(unittest.TestCase):
             model = ReportGenerator(tmp, "t").build_model({"findings": []})
             self.assertEqual(model.to_dict()["coverage"]["rootfs_files"], 12)
 
-    def test_report_markdown_uses_deepduck_title(self) -> None:
+    def test_report_markdown_uses_firmxplore_title(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "t"
             write_json(task / "reports" / "analysis.json", base_report())
             model = ReportGenerator(tmp, "t").build_model({"findings": []})
             path = ReportGenerator(tmp, "t").generate_markdown(model)
-            self.assertIn("# DeepDuck Firmware Security Analysis Report", path.read_text(encoding="utf-8"))
+            self.assertIn("# FirmXplore Firmware Security Analysis Report", path.read_text(encoding="utf-8"))
 
     def test_report_coverage_separates_real_ghidra_and_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -518,11 +518,11 @@ class DeepDuckV01IntegrationTests(unittest.TestCase):
         stages = {name: PipelineStageResult(name, status="completed") for name in V01_PIPELINE_STAGES}
         self.assertEqual([stages[name].to_dict()["stage"] for name in V01_PIPELINE_STAGES][-1], "COMPLETED")
 
-    def test_final_report_schema_name_is_deepduck(self) -> None:
+    def test_final_report_schema_name_is_firmxplore(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             write_json(Path(tmp) / "t" / "reports" / "analysis.json", base_report())
             model = ReportGenerator(tmp, "t").build_model({"findings": []})
-            self.assertEqual(model.to_dict()["schema_version"], "deepduck.report.v1")
+            self.assertEqual(model.to_dict()["schema_version"], "firmxplore.report.v1")
 
 
 if __name__ == "__main__":

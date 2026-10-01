@@ -9,6 +9,16 @@ from pathlib import Path
 
 from fwagent.dynamic.api import DynamicToolAPI
 
+def _env_flag(*names: str, default: str = "") -> str:
+    """FIRMXPLORE_ 前缀优先，DEEPDUCK_ 旧前缀兼容。"""
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None:
+            return value
+    return default
+
+
+
 
 WORKSPACE = Path("workspace")
 DYNAMIC_TASK = WORKSPACE / "v0_1-final-dynamic-01"
@@ -16,7 +26,7 @@ PROVIDER_TASK = WORKSPACE / "v0_1-provider-01"
 
 
 class V01RealDynamicProviderAcceptanceTests(unittest.TestCase):
-    @unittest.skipUnless(os.environ.get("DEEPDUCK_RUN_REAL_DYNAMIC_TESTS") == "1", "real dynamic acceptance disabled")
+    @unittest.skipUnless(_env_flag("FIRMXPLORE_RUN_REAL_DYNAMIC_TESTS", "DEEPDUCK_RUN_REAL_DYNAMIC_TESTS") == "1", "real dynamic acceptance disabled")
     def test_real_fastcgi_runtime_observation_is_canonical(self) -> None:
         evidence_path = DYNAMIC_TASK / "dynamic" / "evidence" / "evidence.json"
         integration_path = DYNAMIC_TASK / "dynamic" / "application" / "device_manager" / "integration_validation.json"
@@ -40,7 +50,7 @@ class V01RealDynamicProviderAcceptanceTests(unittest.TestCase):
         for token in ("$(", "`", "&&", "||", "/bin/sh", "cmd.exe", "powershell"):
             self.assertNotIn(token, request_text)
 
-    @unittest.skipUnless(os.environ.get("DEEPDUCK_RUN_REAL_DYNAMIC_TESTS") == "1", "real dynamic acceptance disabled")
+    @unittest.skipUnless(_env_flag("FIRMXPLORE_RUN_REAL_DYNAMIC_TESTS", "DEEPDUCK_RUN_REAL_DYNAMIC_TESTS") == "1", "real dynamic acceptance disabled")
     def test_real_dynamic_tools_do_not_expose_raw_execution(self) -> None:
         api = DynamicToolAPI(WORKSPACE, "v0_1-final-dynamic-01")
         forbidden = {
@@ -58,7 +68,7 @@ class V01RealDynamicProviderAcceptanceTests(unittest.TestCase):
         }
         self.assertFalse(set(api.tools) & forbidden)
 
-    @unittest.skipUnless(os.environ.get("DEEPDUCK_RUN_REAL_PROVIDER_TESTS") == "1", "real provider acceptance disabled")
+    @unittest.skipUnless(_env_flag("FIRMXPLORE_RUN_REAL_PROVIDER_TESTS", "DEEPDUCK_RUN_REAL_PROVIDER_TESTS") == "1", "real provider acceptance disabled")
     def test_real_provider_smoke_cli_ready(self) -> None:
         result = subprocess.run(
             [sys.executable, "-m", "fwagent.cli", "model-smoke", "--timeout", "30", "--max-retries", "1"],
@@ -75,7 +85,7 @@ class V01RealDynamicProviderAcceptanceTests(unittest.TestCase):
         self.assertEqual(payload["tool_calling"]["supported"], "supported")
         self.assertNotIn("Authorization", result.stdout)
 
-    @unittest.skipUnless(os.environ.get("DEEPDUCK_RUN_REAL_PROVIDER_TESTS") == "1", "real provider acceptance disabled")
+    @unittest.skipUnless(_env_flag("FIRMXPLORE_RUN_REAL_PROVIDER_TESTS", "DEEPDUCK_RUN_REAL_PROVIDER_TESTS") == "1", "real provider acceptance disabled")
     def test_real_provider_agent_artifact_is_provider_backed(self) -> None:
         agent_path = PROVIDER_TASK / "dynamic" / "validation" / "agent" / "agent_run.json"
         self.assertTrue(agent_path.exists(), f"missing provider agent artifact: {agent_path}")

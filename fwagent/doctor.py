@@ -34,7 +34,7 @@ CHECKS = [
 
 
 def run_doctor(*, dynamic: bool = False) -> tuple[int, str]:
-    lines = ["DeepDuck Environment Check", ""]
+    lines = ["FirmXplore Environment Check", ""]
     failed = False
     for check in CHECKS:
         ok, detail = _run_check(check)

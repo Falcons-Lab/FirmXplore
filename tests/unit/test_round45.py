@@ -138,8 +138,23 @@ class Round45Tests(unittest.TestCase):
         candidate = self._path_candidate("system", "command_execution", "statically_supported", "L3_argument_propagation")
         self.assertEqual(candidate[0].hypothesis_type, "possible_command_influence")
 
-    def test_command_candidate_requires_flow(self):
+    def test_command_candidate_from_same_component(self):
+        # 门槛放宽（P0 修复）：L1 同组件路径也生成候选假设（confidence 打折，
+        # 下游 dedup / max_candidates / FindingClaimGuard 仍生效）
         candidate = self._path_candidate("system", "command_execution", "candidate", "L1_same_component")
+        self.assertEqual(len(candidate), 1)
+        self.assertEqual(candidate[0].hypothesis_type, "possible_command_influence")
+        self.assertEqual(candidate[0].support_level, "candidate")
+
+    def test_command_candidate_from_reachable_callchain(self):
+        # L2 可达调用链同样生成候选假设
+        candidate = self._path_candidate("system", "command_execution", "candidate", "L2_reachable_call_chain")
+        self.assertEqual(len(candidate), 1)
+        self.assertEqual(candidate[0].support_level, "candidate")
+
+    def test_command_candidate_rejects_weak_evidence(self):
+        # L0 仅"源与汇都存在"，无任何组件/调用链关联：仍然不生成
+        candidate = self._path_candidate("system", "command_execution", "candidate", "L0_source_sink_exist")
         self.assertEqual(candidate, [])
 
     def test_source_system_presence_alone_not_command_injection(self):
@@ -215,7 +230,8 @@ class Round45Tests(unittest.TestCase):
         self.assertEqual(finding.status, "candidate")
 
     def test_finding_grouping(self):
-        self.assertEqual(self.synth()["summary"]["finding_candidate_count"], 2)
+        # 门槛放宽后，fixture 中两条 L1 路径也产出 finding 候选（2 -> 4）
+        self.assertEqual(self.synth()["summary"]["finding_candidate_count"], 4)
 
     def test_candidate_cwe_optional_mapping(self):
         candidate = self.candidate("HC-unsafe-input-handling-tp-ret2text-stdin-gets")

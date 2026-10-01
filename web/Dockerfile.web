@@ -1,0 +1,31 @@
+# FirmXplore Web 一体化镜像：FastAPI 后端 + Vite 构建的前端静态资源。
+# 分析运行时依赖（binwalk/unblob/Ghidra 等）沿用仓库根目录的主 Dockerfile，
+# 因此本文件基于已构建好的 firmxplore 镜像叠加 Web 层。
+FROM firmxplore:latest
+
+WORKDIR /app
+
+# Web 后端依赖（fwagent 本体已在基础镜像中安装）
+COPY web/server/requirements.txt /app/web/server/requirements.txt
+RUN pip install --no-cache-dir -r /app/web/server/requirements.txt
+
+# 后端源码与前端构建产物
+COPY web/server /app/web/server
+COPY web/frontend/dist /app/web/frontend/dist
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    WEB_WORKSPACE_ROOT=/work/workspace \
+    WEB_UPLOAD_ROOT=/work/web/data/uploads \
+    WEB_DATABASE_URL=sqlite:////work/web/data/firmxplore.db
+
+WORKDIR /work
+
+EXPOSE 8000
+
+# 单 worker：SSE 与任务队列基于进程内状态，扩容需引入 Redis 等外部组件。
+# 必须清空基础镜像的 ENTRYPOINT（firmxplore 的 ENTRYPOINT 是 ["fwagent"]，
+# 否则 CMD 会被拼成 "fwagent python -m uvicorn ..." 导致容器启动即崩溃）
+ENTRYPOINT []
+CMD ["python", "-m", "uvicorn", "web.server.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

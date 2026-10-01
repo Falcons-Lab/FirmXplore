@@ -3,19 +3,20 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fwagent"
+name = "firmxplore"
 version = "0.1.0"
-description = "Deterministic first-pass IoT firmware analysis pipeline"
+description = "FirmXplore: Firmware eXploration and Vulnerability Analysis"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-  { name = "DeepDuck" }
+  { name = "FirmXplore" }
 ]
 license = { text = "MIT" }
 dependencies = []
 
+# 对外统一入口是 firmxplore；fwagent 保留为兼容别名（内部包名不变）
 [project.scripts]
-deepduck = "fwagent.cli:main"
+firmxplore = "fwagent.cli:main"
 fwagent = "fwagent.cli:main"
 
 [tool.setuptools.packages.find]

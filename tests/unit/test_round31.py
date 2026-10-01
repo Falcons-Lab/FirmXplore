@@ -97,9 +97,9 @@ class Round31Tests(unittest.TestCase):
 
     def test_windows_path_conversion(self) -> None:
         self.assertEqual(host_to_container(r"C:\Users\Me\firmware.bin"), "/work/c/Users/Me/firmware.bin")
-        converted = host_to_container(r"D:\Git-Projects\DeepDuck\workspace\a b\固件.bin")
+        converted = host_to_container(r"D:\Git-Projects\FirmXplore\workspace\a b\固件.bin")
         self.assertTrue(converted.startswith("/work/d/"))
-        mapped = host_to_container(r"D:\Git-Projects\DeepDuck\workspace\a", [("D:\\Git-Projects\\DeepDuck", "/work")])
+        mapped = host_to_container(r"D:\Git-Projects\FirmXplore\workspace\a", [("D:\\Git-Projects\\FirmXplore", "/work")])
         self.assertEqual(mapped, "/work/workspace/a")
         info = host_and_container_paths("C:\\firmware.bin")
         self.assertIn("host_path", info)

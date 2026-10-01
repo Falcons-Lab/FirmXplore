@@ -1,0 +1,8 @@
+# 后端运行时数据（数据库 / 上传 / 加密密钥）
+server/__pycache__/
+data/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo

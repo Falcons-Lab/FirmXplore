@@ -68,14 +68,14 @@ class GhidraRuntimeTests(unittest.TestCase):
             )
             runtime = GhidraRuntime(
                 Path(tmp),
-                settings=GhidraSettings(home=Path("missing-ghidra"), docker_image="fwagent-round2:latest"),
+                settings=GhidraSettings(home=Path("missing-ghidra"), docker_image="firmxplore:latest"),
                 runner=runner,
             )
 
             result = runtime.check_container_environment()
 
             self.assertTrue(result["success"])
-            self.assertEqual(result["result"]["image"], "fwagent-round2:latest")
+            self.assertEqual(result["result"]["image"], "firmxplore:latest")
             self.assertEqual(result["result"]["java_version"], "21.0.8")
             self.assertEqual(result["result"]["ghidra_version"], "12.1.3")
             self.assertEqual(result["result"]["analyze_headless"], "/opt/ghidra/support/analyzeHeadless")

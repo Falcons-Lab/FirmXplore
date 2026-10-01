@@ -152,4 +152,5 @@ RUN mkdir -p \
 
 WORKDIR /work
 
-ENTRYPOINT ["fwagent"]
+# 对外 CLI 入口为 firmxplore（fwagent 别名保留，见 pyproject [project.scripts]）
+ENTRYPOINT ["firmxplore"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from fwagent.model.config import CONFIGURED_MESSAGE, ModelConfig, ModelConfigErr
 from fwagent.models import Evidence, Hypothesis
 from fwagent.tools.ghidra_api import BinaryToolAPI, DANGEROUS_NAMES
 
+logger = logging.getLogger(__name__)
 
 VALID_HYPOTHESIS_STATUSES = {"candidate", "investigating", "supported", "rejected"}
 
@@ -31,6 +33,14 @@ You must:
 Important: presence of system(), strcpy(), sprintf(), memcpy(), etc. does NOT by
 itself confirm a vulnerability. You must inspect callers, references, and context
 before creating a supported hypothesis.
+
+Decompilation guidance (P2-1): decompilation runs on demand, so symbol-level
+evidence alone is shallow. For every network_binary or cgi entry point you
+investigate, call ghidra.decompile_function on at least 1-2 key functions
+(the external-input receiver and the dangerous-call site) BEFORE creating or
+promoting a hypothesis. Record the decompiled evidence with evidence.create;
+a hypothesis whose evidence only cites import/symbol summaries is weaker than
+one backed by decompiled call sites.
 
 Allowed tools:
 {tools}
@@ -306,6 +316,7 @@ class PiAgent:
         max_binary_analyses: int | None = None,
         max_decompilations_per_binary: int | None = None,
         binary_api_workspace: str | Path | None = None,
+        require_ghidra: bool = True,
     ):
         self.workspace_root = Path(workspace_root).resolve()
         self.task_id = task_id
@@ -346,6 +357,14 @@ class PiAgent:
         self.binaries_seen: set[str] = set()
         self.decompilation_counts: dict[str, int] = defaultdict(int)
         self.sanity_checks: dict[str, bool] = {}
+        # 降级模式：Ghidra 工具 API 不可用时仍允许模型驱动的调查循环
+        # （Ghidra 工具调用会在运行时逐个失败，模型收到失败结果后继续推理）。
+        # require_ghidra=False 时 sanity check 不再因 Ghidra 缺失而拒绝运行。
+        self.require_ghidra = require_ghidra
+        self.degraded = False
+        # P0-1：provider 瞬态错误容错参数与错误记录
+        self.max_consecutive_model_failures = 3
+        self.model_errors: list[str] = []
 
         try:
             self.report = self._load_report()
@@ -418,11 +437,19 @@ class PiAgent:
         report_exists = (self.task_dir / "reports" / "analysis.json").exists()
         binary = self._resolve_binary(self._selected_binary() or "")
         environment = self.binary_tools.runtime.check_environment()
+        ghidra_ok = bool(environment.get("success"))
+        if not ghidra_ok and not self.require_ghidra:
+            # 降级：记录状态但不阻塞模型调查（模型调用比工具执行更重要）
+            self.degraded = True
+            logger.warning(
+                "ghidra tool api unavailable; running PiAgent in degraded mode (model loop only)"
+            )
+            ghidra_ok = True
         return {
             "workspace_exists": self.task_dir.exists(),
             "analysis_json_exists": report_exists,
             "priority_binary_exists": bool(binary and binary.exists()),
-            "ghidra_tool_api_callable": bool(environment.get("success")),
+            "ghidra_tool_api_callable": ghidra_ok,
         }
 
     def _run_loop(self) -> None:
@@ -431,17 +458,36 @@ class PiAgent:
             {"role": "user", "content": self._initial_prompt()},
         ]
         malformed = 0
+        # P0-1：provider 层的瞬态错误（断连/超时/5xx）不再终止整个调查——
+        # 记入 model_errors 并继续下一轮；连续 max_consecutive_model_failures
+        # 次失败才判定 model_error 终止。
+        consecutive_failures = 0
         while self.steps < self.max_steps:
             try:
                 response = self.model.chat(messages, max_tokens=800)
-            except Exception as exc:  # noqa: BLE001 - model failures become structured stop reasons
-                self.stop_reason = "model_error"
-                self.model_error = str(exc)
-                break
+            except Exception as exc:  # noqa: BLE001 - 模型失败先容错再终止
+                self.model_errors.append(str(exc))
+                consecutive_failures += 1
+                if consecutive_failures >= self.max_consecutive_model_failures:
+                    self.stop_reason = "model_error"
+                    self.model_error = str(exc)
+                    break
+                logger.warning(
+                    "transient model failure (%d/%d consecutive): %s",
+                    consecutive_failures,
+                    self.max_consecutive_model_failures,
+                    exc,
+                )
+                continue
             if not response.get("success"):
-                self.stop_reason = "model_error"
-                self.model_error = str(response.get("error") or "model request failed")
-                break
+                self.model_errors.append(str(response.get("error") or "model request failed"))
+                consecutive_failures += 1
+                if consecutive_failures >= self.max_consecutive_model_failures:
+                    self.stop_reason = "model_error"
+                    self.model_error = str(response.get("error") or "model request failed")
+                    break
+                continue
+            consecutive_failures = 0
 
             action = self._parse_action(response.get("content", ""))
             if action is None:
@@ -696,6 +742,8 @@ class PiAgent:
             "hypothesis_count": len(self.hypotheses),
             "stop_reason": self.stop_reason,
             "model_error": self.model_error,
+            "model_errors": list(self.model_errors),
+            "degraded": self.degraded,
             "result": (
                 "SUPPORTED STATIC HYPOTHESIS"
                 if supported

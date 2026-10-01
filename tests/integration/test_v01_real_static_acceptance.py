@@ -8,6 +8,16 @@ import sys
 import unittest
 from pathlib import Path
 
+def _env_flag(*names: str, default: str = "") -> str:
+    """FIRMXPLORE_ 前缀优先，DEEPDUCK_ 旧前缀兼容。"""
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None:
+            return value
+    return default
+
+
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = REPO_ROOT / "workspace"
@@ -18,11 +28,11 @@ def enabled(name: str) -> bool:
     return os.environ.get(name) == "1"
 
 
-class DeepDuckV01RealStaticAcceptanceTests(unittest.TestCase):
-    @unittest.skipUnless(enabled("DEEPDUCK_RUN_REAL_DOCKER_TESTS"), "set DEEPDUCK_RUN_REAL_DOCKER_TESTS=1 to run real Docker extraction acceptance")
+class FirmXploreV01RealStaticAcceptanceTests(unittest.TestCase):
+    @unittest.skipUnless(enabled(_env_flag("FIRMXPLORE_RUN_REAL_DOCKER_TESTS", "DEEPDUCK_RUN_REAL_DOCKER_TESTS", default="0")), "set DEEPDUCK_RUN_REAL_DOCKER_TESTS=1 to run real Docker extraction acceptance")
     def test_fresh_docker_extraction_establishes_canonical_rootfs(self) -> None:
         self.assertTrue(FIRMWARE.exists(), f"firmware missing: {FIRMWARE}")
-        task_id = os.environ.get("DEEPDUCK_REAL_DOCKER_TASK_ID", "v0_1-real-docker-test")
+        task_id = _env_flag("FIRMXPLORE_REAL_DOCKER_TASK_ID", "DEEPDUCK_REAL_DOCKER_TASK_ID", default="v0_1-real-docker-test")
         task_dir = WORKSPACE / task_id
         if task_dir.exists():
             shutil.rmtree(task_dir)
@@ -40,13 +50,13 @@ class DeepDuckV01RealStaticAcceptanceTests(unittest.TestCase):
                 task_id,
                 "--no-dynamic",
                 "--timeout",
-                os.environ.get("DEEPDUCK_REAL_DOCKER_TIMEOUT", "900"),
+                _env_flag("FIRMXPLORE_REAL_DOCKER_TIMEOUT", "DEEPDUCK_REAL_DOCKER_TIMEOUT", default="900"),
                 "--json",
             ],
             cwd=REPO_ROOT,
             text=True,
             capture_output=True,
-            timeout=int(os.environ.get("DEEPDUCK_REAL_DOCKER_TEST_TIMEOUT", "1200")),
+            timeout=int(_env_flag("FIRMXPLORE_REAL_DOCKER_TEST_TIMEOUT", "DEEPDUCK_REAL_DOCKER_TEST_TIMEOUT", default="1200")),
         )
         self.assertIn(completed.returncode, {0, 1}, completed.stderr + completed.stdout)
 
@@ -67,12 +77,12 @@ class DeepDuckV01RealStaticAcceptanceTests(unittest.TestCase):
         self.assertTrue(any(item.get("method") == "docker-binwalk" and item.get("status") == "success" for item in attempts))
 
     @unittest.skipUnless(
-        enabled("DEEPDUCK_RUN_REAL_DOCKER_TESTS") and enabled("DEEPDUCK_RUN_REAL_GHIDRA_TESTS"),
+        enabled(_env_flag("FIRMXPLORE_RUN_REAL_DOCKER_TESTS", "DEEPDUCK_RUN_REAL_DOCKER_TESTS", default="0")) and enabled(_env_flag("FIRMXPLORE_RUN_REAL_GHIDRA_TESTS", "DEEPDUCK_RUN_REAL_GHIDRA_TESTS", default="0")),
         "set DEEPDUCK_RUN_REAL_DOCKER_TESTS=1 and DEEPDUCK_RUN_REAL_GHIDRA_TESTS=1; Ghidra is checked inside the Docker worker",
     )
     def test_fresh_pipeline_produces_real_ghidra_evidence(self) -> None:
         self.assertTrue(FIRMWARE.exists(), f"firmware missing: {FIRMWARE}")
-        task_id = os.environ.get("DEEPDUCK_REAL_GHIDRA_TASK_ID", "v0_1-real-ghidra-test")
+        task_id = _env_flag("FIRMXPLORE_REAL_GHIDRA_TASK_ID", "DEEPDUCK_REAL_GHIDRA_TASK_ID", default="v0_1-real-ghidra-test")
         task_dir = WORKSPACE / task_id
         if task_dir.exists():
             shutil.rmtree(task_dir)
@@ -90,13 +100,13 @@ class DeepDuckV01RealStaticAcceptanceTests(unittest.TestCase):
                 task_id,
                 "--no-dynamic",
                 "--timeout",
-                os.environ.get("DEEPDUCK_REAL_GHIDRA_TIMEOUT", "1800"),
+                _env_flag("FIRMXPLORE_REAL_GHIDRA_TIMEOUT", "DEEPDUCK_REAL_GHIDRA_TIMEOUT", default="1800"),
                 "--json",
             ],
             cwd=REPO_ROOT,
             text=True,
             capture_output=True,
-            timeout=int(os.environ.get("DEEPDUCK_REAL_GHIDRA_TEST_TIMEOUT", "2400")),
+            timeout=int(_env_flag("FIRMXPLORE_REAL_GHIDRA_TEST_TIMEOUT", "DEEPDUCK_REAL_GHIDRA_TEST_TIMEOUT", default="2400")),
         )
         self.assertIn(completed.returncode, {0, 1}, completed.stderr + completed.stdout)
 

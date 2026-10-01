@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -16,6 +18,48 @@ from fwagent.dynamic.correlation import (
 )
 from fwagent.dynamic.models import DynamicEvidence, DynamicHypothesis
 from fwagent.dynamic.workspace import DynamicWorkspace
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# 静态入口发现（P0-1）：不依赖动态仿真，从 rootfs 配置与 Ghidra 证据推导入口点。
+# 这是对 _discover_entries()（lighttpd/FastCGI 专用路径）的通用补充，
+# 使 httpd/goahead/boa 等自研 Web 栈的固件也能产出攻击面。
+# ---------------------------------------------------------------------------
+_LISTEN_PATTERNS = [
+    re.compile(r"(?:\bbind\b|\blisten\b|\bListen\b|\bport\b|\bPort\b)\s*[:= ]\s*(\d{2,5})\b"),
+    re.compile(r"(?:server\.port|server_port|http_port|listen_port)\s*[:= ]\s*(\d{2,5})\b"),
+]
+
+# 监听端口的常见私网保留值与 Willard 值跳过，减少误报
+_PORT_BLACKLIST = {0, 1}
+
+_SERVICE_HINTS = {
+    "httpd": "http",
+    "lighttpd": "http",
+    "goahead": "http",
+    "uhttpd": "http",
+    "boa": "http",
+    "thttpd": "http",
+    "mini_httpd": "http",
+    "telnetd": "telnet",
+    "sshd": "ssh",
+    "dropbear": "ssh",
+    "dnsmasq": "dns",
+    "hostapd": "wifi",
+    "wpa_supplicant": "wifi",
+    "upnpd": "upnp",
+    "miniupnpd": "upnp",
+}
+
+# Ghidra 证据中代表"接收外部输入"的网络调用（用于 network-caller 二进制入口）
+_NET_FUNCS = (
+    "socket", "bind", "listen", "accept", "recv", "recvfrom", "recvmsg",
+    "select", "poll", "epoll_wait", "read",
+)
+
+# 网络调用二进制入口的置信度（低于 config_declared，高于纯猜测）
+_NETWORK_CALLER_CONFIDENCE = 0.6
 
 
 ENTRY_POINT_TYPES = {
@@ -335,7 +379,13 @@ class AttackSurfaceBuilder:
         self.dynamic_evidence = self.workspace.load_evidence()
 
     def build(self) -> dict[str, Any]:
-        entries = self._discover_entries()[: self.config.attack_surface.max_entries]
+        entries = self._discover_entries()
+        try:
+            entries.extend(self._discover_static_entries())
+        except Exception:  # noqa: BLE001  静态发现失败不能拖垮既有仿真路径
+            logger.exception("static entry discovery failed")
+        # 按 entry_id 去重后截断
+        entries = _unique_entries(entries)[: self.config.attack_surface.max_entries]
         routes = self._discover_routes(entries)[: self.config.attack_surface.max_routes]
         handlers = self._describe_handlers(entries)
         input_sources = self._describe_inputs(entries)
@@ -600,6 +650,282 @@ class AttackSurfaceBuilder:
                 )
             )
         return _unique_entries(entries)
+
+    # ------------------------------------------------------------------
+    # 静态入口发现（P0-1）：不依赖仿真，让 httpd/goahead/boa 等自研
+    # Web 栈固件也能产出攻击面。与 _discover_entries() 的结果合并去重。
+    # ------------------------------------------------------------------
+    def _discover_static_entries(self) -> list[EntryPoint]:
+        entries: list[EntryPoint] = []
+        report = self._load_report()
+        rootfs = self._resolve_rootfs(report)
+        if rootfs is not None:
+            entries.extend(self._scan_listen_ports(rootfs))
+            entries.extend(self._web_route_entries(rootfs))
+        else:
+            logger.warning("static entry discovery: rootfs not accessible, skipping config/web scan")
+        entries.extend(self._network_callers_from_ghidra())
+
+        unique = _unique_entries(entries)
+        if unique:
+            logger.info("static entry discovery: %d entries", len(unique))
+        return unique
+
+    def _resolve_rootfs(self, report: dict[str, Any]) -> Path | None:
+        """从 analysis.json 取 rootfs 路径；跨环境（宿主机路径在容器内）时尝试重映射。"""
+        rootfs_path = str((report.get("extraction") or {}).get("rootfs") or "")
+        if not rootfs_path:
+            return None
+        candidate = Path(rootfs_path)
+        if candidate.exists():
+            return candidate
+        remapped = _remap_workspace_path(rootfs_path)
+        if remapped and remapped.exists():
+            return remapped
+        logger.warning("rootfs not accessible: %s", rootfs_path)
+        return None
+
+    def _scan_listen_ports(self, rootfs: Path) -> list[EntryPoint]:
+        """扫描 init 脚本与服务配置中的监听端口，生成 service_port 入口。"""
+        entries: list[EntryPoint] = []
+        candidates: list[Path] = []
+        for pattern in ("etc/init.d/*", "etc/rc.d/*", "etc/*.conf", "etc/**/*.conf"):
+            try:
+                candidates.extend(rootfs.glob(pattern))
+            except OSError:
+                continue
+        # 常见 Web 服务器配置的显式路径
+        for web_conf in ("lighttpd.conf", "boa.conf", "uhttpd.conf", "httpd.conf"):
+            p = rootfs / "etc" / web_conf
+            if p.exists():
+                candidates.append(p)
+
+        seen_ports: set[tuple[str, int]] = set()
+        for cfg in candidates:
+            try:
+                if not _is_readable_file(cfg) or cfg.stat().st_size > 512 * 1024:
+                    continue  # 跳过超大/设备文件，只解析文本配置
+                if b"\x00" in cfg.read_bytes()[:4096]:
+                    continue  # 二进制文件跳过
+                text = cfg.read_text(errors="ignore")
+            except OSError:
+                continue
+            svc = self._infer_service_from_path(cfg, text)
+            for pat in _LISTEN_PATTERNS:
+                for m in pat.finditer(text):
+                    try:
+                        port = int(m.group(1))
+                    except ValueError:
+                        continue
+                    if not (1 <= port <= 65535) or port in _PORT_BLACKLIST:
+                        continue
+                    key = (svc, port)
+                    if key in seen_ports:
+                        continue
+                    seen_ports.add(key)
+                    cid = self.graph.resolve_component_id(svc) if self.graph else None
+                    entries.append(
+                        EntryPoint(
+                            entry_id=f"EP-SERVICE-{_surface_slug(svc)}-{port}",
+                            entry_type="service_port",
+                            name=f"{svc} TCP {port}",
+                            protocol="tcp",
+                            transport="tcp",
+                            port=port,
+                            service=svc,
+                            component_id=cid,
+                            # init.d 脚本来源标记为 init_script，其余为静态引用
+                            source="init_script" if "init.d" in str(cfg) else "static_reference",
+                            static_or_dynamic="static",
+                            exposure_scope="local_network",
+                            runtime_confirmed=False,
+                            confidence=self.config.attack_surface.confidence.config_declared,
+                            evidence_ids=[f"ART:static-listen-{cfg.name}"],
+                        )
+                    )
+        return entries
+
+    def _infer_service_from_path(self, cfg: Path, text: str) -> str:
+        """从文件名与内容推断服务名（httpd/telnetd/dnsmasq...）。"""
+        name = cfg.stem.lower()
+        for hint, svc in _SERVICE_HINTS.items():
+            if hint in name:
+                return svc
+        lowered = text.lower()[:8192]
+        for hint, svc in _SERVICE_HINTS.items():
+            if hint in lowered:
+                return svc
+        return name or "unknown"
+
+    def _network_callers_from_ghidra(self) -> list[EntryPoint]:
+        """从 Ghidra 产物中识别调用网络收发函数的二进制，生成 tcp_service 入口。
+
+        这覆盖自研 Web 服务器（无标准配置文件可解析）的情况：
+        只要二进制导入了 socket/bind/listen/accept/recv 之一，它就是网络入口候选。
+        数据源：
+        - ghidra/analysis_summary.json 的 analyses[].result.imports（导入符号表）
+        - ghidra/evidence.json 的证据 id（SE-GHIDRA-<slug>-<func>，兜底）
+        """
+        entries: list[EntryPoint] = []
+        net_evidence: dict[str, list[str]] = {}
+
+        # (a) imports：逐二进制扫描导入符号表
+        summary_path = self.workspace.task_dir / "ghidra" / "analysis_summary.json"
+        if summary_path.exists():
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                summary = {}
+            for analysis in summary.get("analyses") or []:
+                binary = str(analysis.get("binary") or "")
+                if not binary:
+                    continue
+                result = analysis.get("result") or {}
+                names = {str(i.get("name") or "").lower() for i in (result.get("imports") or []) if isinstance(i, dict)}
+                matched = sorted(nm for nm in names if any(nf == nm or nf in nm for nf in _NET_FUNCS))
+                if matched:
+                    # binary 是 rootfs 内绝对路径（/sbin/httpd），取末段做组件匹配
+                    slug = Path(binary).name
+                    ev_ids = [f"ART:ghidra-imports-{_surface_slug(slug)}"]
+                    net_evidence.setdefault(slug, []).extend(ev_ids)
+
+        # (b) evidence id 兜底（imports 缺失时仍可从证据记录恢复）
+        evidence_path = self.workspace.task_dir / "ghidra" / "evidence.json"
+        if evidence_path.exists():
+            try:
+                records = json.loads(evidence_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                records = []
+            if isinstance(records, dict):
+                records = records.get("evidence") or []
+            for item in records:
+                if not isinstance(item, dict):
+                    continue
+                ev_id = str(item.get("id") or "")
+                binary = str((item.get("metadata") or {}).get("binary") or "")
+                if not ev_id or not binary:
+                    continue
+                func = ev_id.rsplit("-", 1)[-1].lower()
+                if any(nf == func or nf in func for nf in _NET_FUNCS):
+                    net_evidence.setdefault(Path(binary).name, []).append(ev_id)
+
+        for binary_name, ev_ids in sorted(net_evidence.items()):
+            cid = self.graph.resolve_component_id(binary_name) if self.graph else None
+            entries.append(
+                EntryPoint(
+                    entry_id=f"EP-BINARY-{_surface_slug(binary_name)}",
+                    entry_type="tcp_service",
+                    name=f"{binary_name} (network syscalls)",
+                    protocol="tcp",
+                    transport="tcp",
+                    service=binary_name,
+                    component_id=cid,
+                    source="static_reference",
+                    static_or_dynamic="static",
+                    exposure_scope="local_network",
+                    runtime_confirmed=False,
+                    confidence=_NETWORK_CALLER_CONFIDENCE,
+                    evidence_ids=ev_ids,
+                )
+            )
+        return entries
+
+    def _web_route_entries(self, rootfs: Path) -> list[EntryPoint]:
+        """扫描 Web 目录中的 CGI 处理器与脚本，生成 http_route 入口。
+
+        P0-2：高价值 CGI/脚本入口必须解析到组件，否则污点源派生会跳过它们：
+        1. 用路径片段匹配 component_graph 中的 binary/library 组件（cgibin →
+           C-BINARY-htdocs-cgibin）；
+        2. 对脚本解析内容引用的二进制（shell 脚本调用的处理器）；
+        3. ELF 自身（magic 判定）直接作为 handler。
+        解析结果同时写入 component_id 与 handler_component_id。
+        """
+        entries: list[EntryPoint] = []
+        component_names = {item.name: item.component_id for item in self.graph.components.values()} if self.graph else {}
+        for wd in ("htdocs", "www", "web", "usr/www", "var/www"):
+            web_root = rootfs / wd
+            if not web_root.is_dir():
+                continue
+            try:
+                for cgi in web_root.rglob("cgibin"):
+                    if not _is_readable_file(cgi) or not cgi.is_file():
+                        continue
+                    rel = cgi.relative_to(rootfs).as_posix()
+                    component_id, handler_id = self._resolve_route_component(cgi, rel, component_names)
+                    entries.append(
+                        EntryPoint(
+                            entry_id=f"EP-CGI-{rel.replace('/', '-')}",
+                            entry_type="cgi",
+                            name=f"CGI handler: /{rel}",
+                            protocol="http",
+                            transport="tcp",
+                            path=f"/{rel}",
+                            service="http",
+                            component_id=component_id,
+                            handler_component_id=handler_id,
+                            source="static_reference",
+                            static_or_dynamic="static",
+                            exposure_scope="local_network",
+                            runtime_confirmed=False,
+                            confidence=0.7,
+                            evidence_ids=[f"ART:web-cgi-{cgi.name}"],
+                        )
+                    )
+                for pattern in ("*.cgi", "*.fcgi"):
+                    for script in web_root.rglob(pattern):
+                        if not _is_readable_file(script) or not script.is_file():
+                            continue
+                        rel = script.relative_to(rootfs).as_posix()
+                        component_id, handler_id = self._resolve_route_component(script, rel, component_names)
+                        entries.append(
+                            EntryPoint(
+                                entry_id=f"EP-SCRIPT-{rel.replace('/', '-')}",
+                                entry_type="http_route",
+                                name=f"CGI script: /{rel}",
+                                protocol="http",
+                                transport="tcp",
+                                path=f"/{rel}",
+                                service="http",
+                                component_id=component_id,
+                                handler_component_id=handler_id,
+                                source="static_reference",
+                                static_or_dynamic="static",
+                                exposure_scope="local_network",
+                                runtime_confirmed=False,
+                                confidence=0.5,
+                                evidence_ids=[f"ART:web-script-{script.name}"],
+                            )
+                        )
+            except OSError:
+                continue
+        return entries
+
+    def _resolve_route_component(
+        self, script_path: Path, rel_path: str, component_names: dict[str, str]
+    ) -> tuple[str | None, str | None]:
+        """为 CGI/脚本入口解析 component 与 handler（P0-2 策略 1/2/3）。
+
+        返回 (component_id, handler_component_id)，解析失败时为 (None, None)。
+        """
+        # 策略 1：路径片段匹配组件的 name 或 path（如 htdocs/cgibin → cgibin 组件）
+        for token in (Path(rel_path).stem, Path(rel_path).name, "/".join(Path(rel_path).parts[-2:])):
+            cid = self.graph.resolve_component_id(token) if self.graph else None
+            if cid:
+                return cid, cid
+        try:
+            head = script_path.read_bytes()[:8192]
+        except OSError:
+            return None, None
+        # 策略 3：脚本本身是 ELF → 自身即为 handler 组件
+        if head[:4] == b"\x7fELF":
+            cid = self.graph.resolve_component_id(script_path.stem) if self.graph else None
+            return cid, cid
+        # 策略 2：文本脚本（shell/lua）内容中引用的二进制名 → handler 指向该组件
+        text = head.decode("utf-8", errors="ignore").lower()
+        for name, cid in component_names.items():
+            if name and name.lower() in text:
+                return cid, cid
+        return None, None
 
     def _discover_routes(self, entries: list[EntryPoint]) -> list[RouteMapping]:
         routes: list[RouteMapping] = []
@@ -976,6 +1302,29 @@ def _unique_entries(entries: list[EntryPoint]) -> list[EntryPoint]:
     for entry in entries:
         by_id.setdefault(entry.entry_id, entry)
     return list(by_id.values())
+
+
+def _remap_workspace_path(host_path: str) -> Path | None:
+    """把宿主机上的 workspace 绝对路径重映射为当前环境的 /work/workspace 路径。
+
+    Docker 部署中宿主机把 ./workspace 挂载到容器 /work/workspace，
+    但 fwagent 写进 analysis.json 的 rootfs 是产生任务那一刻的绝对路径
+    （例如 Windows 宿主机创建的任务拿到容器里续跑/调查时就是 D:\\ 路径）。
+    """
+    s = host_path.replace("\\", "/")
+    idx = s.find("workspace")
+    if idx < 0:
+        return None
+    candidate = Path("/work") / s[idx:]
+    return candidate
+
+
+def _is_readable_file(path: Path) -> bool:
+    """is_file() 的容错版：固件里解出的设备文件/特殊 inode 在 Windows 上 stat 会抛 OSError。"""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
 
 
 def _safe_int(value: Any) -> int | None:

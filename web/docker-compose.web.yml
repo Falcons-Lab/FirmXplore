@@ -1,0 +1,39 @@
+# FirmXplore Web 部署：先构建 CLI 基础镜像，再叠加 Web 层。
+#
+#   docker build -t firmxplore:latest .                  # 主 Dockerfile（CLI 分析环境）
+#   docker compose -f web/docker-compose.web.yml up --build
+#
+# name 固定 compose 项目名，保证卷（web-data）不随调用目录漂移
+name: firmxplore
+
+services:
+  firmxplore-web:
+    build:
+      # 上下文是仓库根目录（本文件位于 web/ 下），主 Dockerfile 与 fwagent 源码都在那里
+      context: ..
+      dockerfile: web/Dockerfile.web
+    image: firmxplore-web:latest
+    container_name: firmxplore-web
+    ports:
+      - "8000:8000"
+    working_dir: /work
+    volumes:
+      # workspace 与宿主机共享，CLI 与 Web 看到相同的分析产物
+      - ../workspace:/work/workspace
+      - web-data:/work/web/data
+      # 动态验证需要访问宿主 Docker daemon（fwagent 的 DockerController）
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # 生产环境务必显式设置加密密钥（32 字节 url-safe base64），例如：
+      #   python -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
+      # 兼容说明：旧的 WEB_SECRET_KEY / WEB_* 前缀仍被读取，FIRMXPLORE_* 优先
+      - FIRMXPLORE_SECRET_KEY=${FIRMXPLORE_SECRET_KEY:-}
+      - FIRMXPLORE_RETENTION_DAYS=7
+      - FIRMXPLORE_MAX_CONCURRENT_TASKS=1
+      - FIRMXPLORE_CORS_ORIGINS=http://localhost:8000,http://127.0.0.1:8000
+    mem_limit: 4g
+    pids_limit: 512
+    restart: unless-stopped
+
+volumes:
+  web-data:

@@ -207,7 +207,7 @@ class Round5Tests(unittest.TestCase):
         self.assertNotIn("cdn", path.read_text(encoding="utf-8").lower())
 
     def test_report_schema_version(self):
-        self.assertEqual(REPORT_SCHEMA_VERSION, "deepduck.report.v1")
+        self.assertEqual(REPORT_SCHEMA_VERSION, "firmxplore.report.v1")
 
     def test_report_validator(self):
         model = self.report_model()

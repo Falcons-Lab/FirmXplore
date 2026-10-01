@@ -501,7 +501,10 @@ class HypothesisSynthesizer:
     def _candidates_for_path(self, path: dict[str, Any], source: dict[str, Any], sink: dict[str, Any]) -> list[HypothesisCandidate]:
         sink_type = str(sink.get("sink_type") or "unknown")
         support = _support_level(path)
-        if SUPPORT_ORDER[support] < SUPPORT_ORDER["supported"]:
+        # 门槛从 "supported" 放宽到 "candidate"：L2 可达调用链（callgraph 级证据）
+        # 也允许生成候选假设，否则通用固件的 source→sink 链永远到不了假设合成。
+        # 候选 confidence 已按路径证据打折，下游 dedup / max_candidates / 守卫仍生效。
+        if SUPPORT_ORDER[support] < SUPPORT_ORDER["candidate"]:
             return []
         if sink_type in {"command_execution", "process_execution"}:
             return [self._path_candidate("possible_command_influence", path, source, sink, support)]
